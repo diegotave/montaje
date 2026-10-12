@@ -29,7 +29,26 @@ header label{color:var(--dim);font-size:13px;display:flex;align-items:center;gap
 .stage{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000;overflow:hidden;border-radius:4px}
 .stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0}
 .stage video.on{opacity:1}
-#o2,#o3{background:#000}   /* V2/V3 tapan todo el cuadro, igual que en la exportación */
+#o2,#o3{background:#000}
+/* pantalla completa */
+#fsUI{display:none}
+.stagewrap.fs{position:fixed;inset:0;z-index:30;background:#000}
+.stagewrap.fs .stage{border-radius:0}
+.stagewrap.fs #fsUI{display:block}
+#fsTouch{position:absolute;inset:0;z-index:5;touch-action:none}
+#fsExit{position:absolute;top:max(12px,env(safe-area-inset-top));right:12px;z-index:6;background:#000b;transition:opacity .3s}
+#fsBar{position:absolute;left:0;right:0;bottom:0;z-index:6;padding:28px 16px max(14px,env(safe-area-inset-bottom));background:linear-gradient(transparent,#000d);transition:opacity .3s}
+#fsBar button{background:#000b}
+.fsTop{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.fsTop .spacer{flex:1}
+#fsTC{font:600 15px/1 ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
+#fsTrack{position:relative;height:36px;touch-action:none;cursor:pointer}
+#fsTrack::before{content:'';position:absolute;left:0;right:0;top:16px;height:4px;background:#ffffff40;border-radius:2px}
+#fsMarks{position:absolute;top:11px;height:14px;background:#4da3ff55;border-left:2px solid #4da3ff;border-right:2px solid #4da3ff}
+#fsFill{position:absolute;left:0;top:16px;height:4px;background:var(--accent);border-radius:2px}
+#fsHead{position:absolute;top:9px;width:18px;height:18px;margin-left:-9px;border-radius:50%;background:var(--accent)}
+.fsHint{color:#ffffff99;font-size:12px}
+#fsUI.idle #fsBar,#fsUI.idle #fsExit{opacity:0;pointer-events:none}   /* V2/V3 tapan todo el cuadro, igual que en la exportación */
 .stage .empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);text-align:center;padding:20px}
 .transport{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--panel);border-top:1px solid var(--line)}
 .tc{font:600 17px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;min-width:118px}
@@ -91,7 +110,20 @@ input[type=file]{display:none}
   <video id="o3" playsinline preload="auto"></video>
   <canvas id="gfx"></canvas>
   <div class="empty" id="empty">Agregá videos con <b>&nbsp;+ Video&nbsp;</b>.<br>Se ubican uno detrás del otro en el orden en que los elijas.</div>
-</div></div>
+</div>
+  <div id="fsUI">
+    <div id="fsTouch"></div>
+    <button class="icon" id="fsExit" title="Salir de pantalla completa"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <div id="fsBar">
+      <div class="fsTop"><span id="fsTC"></span><span class="spacer"></span>
+        <button id="fsStart"><svg viewBox="0 0 24 24"><path d="M19 20 9 12l10-8z"/><path d="M5 19V5"/></svg> Desde el inicio</button>
+        <button id="fsRange"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z" fill="currentColor"/></svg> IN → OUT</button>
+      </div>
+      <div id="fsTrack"><i id="fsMarks"></i><i id="fsFill"></i><b id="fsHead"></b></div>
+      <div class="fsHint">Tocá para reproducir o pausar · deslizá para moverte</div>
+    </div>
+  </div>
+</div>
 <audio id="aud" preload="auto"></audio>
 
 <div class="transport">
@@ -102,6 +134,7 @@ input[type=file]{display:none}
   <button class="icon primary" id="play" title="Reproducir"><svg viewBox="0 0 24 24" id="playIco"><path d="M7 4v16l13-8z" fill="currentColor"/></svg></button>
   <button class="icon" id="stepF" title="Cuadro siguiente"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
   <button class="icon" id="nextCut" title="Corte siguiente"><svg viewBox="0 0 24 24"><path d="m5 4 10 8-10 8z"/><path d="M19 5v14"/></svg></button>
+  <button class="icon" id="fsBtn" title="Ver en pantalla completa (F)"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5v5l4-2.5z" fill="currentColor"/></svg></button>
   <button class="icon mark" id="mIn" title="Marcar entrada (I)">IN</button>
   <button class="icon mark" id="mOut" title="Marcar salida (O)">OUT</button>
   <div class="spacer"></div>
@@ -2180,7 +2213,8 @@ function setAspect(a){ aspect = a; $('aspect').value = a; fitStage(); }
 function fitStage(){
   const wrap = document.querySelector('.stagewrap'), st = $('stage');
   const [w, h] = aspect.split(':').map(Number);
-  const W = wrap.clientWidth - 20, H = wrap.clientHeight - 20;
+  const pad = wrap.classList.contains('fs') ? 0 : 20;
+  const W = wrap.clientWidth - pad, H = wrap.clientHeight - pad;
   let sw = W, sh = W * h / w; if (sh > H){ sh = H; sw = H * w / h; }
   st.style.width = Math.max(0, sw) + 'px'; st.style.height = Math.max(0, sh) + 'px';
   drawGfx();
@@ -2197,9 +2231,11 @@ function elFor(media, preferNotShown = true){
 }
 function show(v){ if (shown === v) return; for (const x of [vA, vB]){ x.classList.toggle('on', x === v); if (x !== v) x.pause(); } shown = v; }
 function quietSeek(v, t){
-  // evita acumular seeks mientras se arrastra
-  if (v._seeking){ v._pending = t; return; }
-  v._seeking = true; v.currentTime = t;
+  // sin metadatos todavía no hay evento 'seeked': el tiempo queda como posición inicial al cargar
+  if (v.readyState < 1){ v._seeking = false; v._pending = null; v.currentTime = t; return; }
+  // evita acumular seeks mientras se arrastra (con un tope por si un 'seeked' nunca llega)
+  if (v._seeking && performance.now() - v._seekAt < 1500){ v._pending = t; return; }
+  v._seeking = true; v._seekAt = performance.now(); v.currentTime = t;
   v.onseeked = () => { v._seeking = false; if (v._pending != null){ const p = v._pending; v._pending = null; quietSeek(v, p); } };
 }
 function previewAt(t){
@@ -2219,11 +2255,11 @@ let raf = 0, cur = null, lastDraw = 0;
 function play(){
   if (!total()) return;
   if (playhead >= total() - 1e-3) playhead = 0;
-  playing = true; cur = null; setPlayIcon();
+  playing = true; cur = null; setPlayIcon(); fsWake();
   raf = requestAnimationFrame(tick);
 }
 function pause(){
-  playing = false; cur = null; cancelAnimationFrame(raf);
+  playing = false; cur = null; playStop = null; cancelAnimationFrame(raf); fsWake();
   vA.pause(); vB.pause(); aud.pause(); aud.playbackRate = 1;
   for (const v of [o2, o3]){ v.pause(); v.playbackRate = 1; }
   playhead = snapFrame(playhead); setPlayIcon(); previewAt(playhead); drawTL(); updTC();
@@ -2277,6 +2313,7 @@ function tick(now){
       else if (o.paused && !o.seeking && Math.abs(o.currentTime - nx.in) > 0.05) o.currentTime = nx.in;
     }
   }
+  if (playStop != null && playhead >= playStop - .5 / fps){ playhead = Math.max(0, playStop - 1 / fps); pause(); return; }
   syncOver(); syncMusic(); drawGfx();
   if (now - lastDraw > 60){ lastDraw = now; updTC(); drawTL(); }
   raf = requestAnimationFrame(tick);
@@ -2328,7 +2365,7 @@ function seek(t){
   else previewAt(playhead);
   updTC(); drawTL();
 }
-function updTC(){ $('tc').firstChild.nodeValue = fmtTC(playhead); $('tcd').textContent = '/ ' + fmtTC(total()); }
+function updTC(){ $('tc').firstChild.nodeValue = fmtTC(playhead); $('tcd').textContent = '/ ' + fmtTC(total()); updFs(); }
 
 // ---------- línea de tiempo ----------
 const cv = $('tl'), g = cv.getContext('2d');
@@ -2620,7 +2657,7 @@ function drawGfx(){
   if (!w || !h) return;
   drawTexts(gg, w, h, playhead, gfxBoxes);
   const st = selText(), b = st && gfxBoxes.find(b => b.tx === st);
-  if (b && !playing){ gg.setLineDash([6 * d, 4 * d]); gg.lineWidth = 1.5 * d; gg.strokeStyle = '#f5b33d'; gg.strokeRect(b.x, b.y, b.w, b.h); gg.setLineDash([]); }
+  if (b && !playing && !fsOn()){ gg.setLineDash([6 * d, 4 * d]); gg.lineWidth = 1.5 * d; gg.strokeStyle = '#f5b33d'; gg.strokeRect(b.x, b.y, b.w, b.h); gg.setLineDash([]); }
   if (gGuide){ gg.fillStyle = '#f5b33dcc'; gg.fillRect(w / 2 - d / 2, 0, d, h); }
 }
 // En el visor: tocar un texto lo selecciona; arrastrarlo lo ubica (se imanta al centro).
@@ -2836,6 +2873,59 @@ cv.addEventListener('wheel', e => {
 function zoom(f){ pps = Math.min(800, Math.max(2, pps * f)); drawTL(); }
 function zoomFit(){ const T = Math.max(total(), music ? music.offset + music.media.duration : 0, 1); pps = Math.min(800, Math.max(2, (W - 40) / (T * 1.05))); seek(0); }
 
+// ---------- pantalla completa ----------
+// Un solo botón: entra en pausa donde estás. Tocar = play/pausa; deslizar = moverse; la barra salta directo.
+const wrapEl = document.querySelector('.stagewrap'), fsUI = $('fsUI'), fsTrack = $('fsTrack');
+let playStop = null, fsIdleT = 0, fsg = null;
+function fsOn(){ return wrapEl.classList.contains('fs'); }
+function enterFs(){
+  if (!total()) return;
+  wrapEl.classList.add('fs');
+  try { const r = wrapEl.requestFullscreen && wrapEl.requestFullscreen({navigationUI: 'hide'}); if (r) r.catch(() => {}); } catch (e){}
+  fitStage(); updFs(); fsWake();
+}
+function exitFs(){
+  if (!fsOn()) return;
+  if (playing) pause();
+  wrapEl.classList.remove('fs'); fsUI.classList.remove('idle');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  fitStage(); drawTL();
+}
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) exitFs(); });
+function fsWake(){
+  if (!fsOn()) return;
+  fsUI.classList.remove('idle'); clearTimeout(fsIdleT);
+  if (playing) fsIdleT = setTimeout(() => fsUI.classList.add('idle'), 2200);
+}
+function updFs(){
+  if (!fsOn()) return;
+  const T = total() || 1, pc = t => (Math.max(0, Math.min(1, t / T)) * 100) + '%';
+  $('fsTC').textContent = fmtTC(playhead) + ' / ' + fmtTC(total());
+  $('fsFill').style.width = pc(playhead); $('fsHead').style.left = pc(playhead);
+  const has = markIn != null || markOut != null, mk = $('fsMarks');
+  $('fsRange').style.display = has ? '' : 'none'; mk.style.display = has ? '' : 'none';
+  if (has){ const [a, b] = markRange(); mk.style.left = pc(a); mk.style.width = `calc(${pc(b - a)} - 4px)`; }
+}
+const fsT = $('fsTouch');
+fsT.addEventListener('pointerdown', e => { fsT.setPointerCapture(e.pointerId); fsg = {x0: e.clientX, t0: playhead, moved: false}; fsWake(); });
+fsT.addEventListener('pointermove', e => {
+  if (!fsg) return;
+  const dx = e.clientX - fsg.x0;
+  if (!fsg.moved){ if (Math.abs(dx) < 12) return; fsg.moved = true; if (playing) pause(); fsg.t0 = playhead; fsg.x0 = e.clientX; return; }
+  const span = Math.min(Math.max(total(), 1), 20);   // un ancho de pantalla = hasta 20 s
+  seek(snapFrame(fsg.t0 + dx / wrapEl.clientWidth * span));
+});
+const fsUp = () => { if (fsg && !fsg.moved){ playing ? pause() : play(); } fsg = null; fsWake(); };
+fsT.addEventListener('pointerup', fsUp); fsT.addEventListener('pointercancel', () => { fsg = null; });
+const trackSeek = e => { const r = fsTrack.getBoundingClientRect(); seek(snapFrame(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * total())); };
+fsTrack.addEventListener('pointerdown', e => { fsTrack.setPointerCapture(e.pointerId); if (playing) pause(); fsTrack._on = true; trackSeek(e); fsWake(); });
+fsTrack.addEventListener('pointermove', e => { if (fsTrack._on) trackSeek(e); });
+fsTrack.addEventListener('pointerup', () => { fsTrack._on = false; });
+$('fsBtn').onclick = enterFs;
+$('fsExit').onclick = exitFs;
+$('fsStart').onclick = () => { if (playing) pause(); seek(0); play(); };
+$('fsRange').onclick = () => { if (playing) pause(); const [a, b] = markRange(); seek(a); play(); playStop = b; };
+
 // ---------- inspector ----------
 function btn(label, fn, cls = ''){ const b = document.createElement('button'); b.innerHTML = label; if (cls) b.className = cls; b.onclick = fn; return b; }
 function updInspector(){
@@ -3037,6 +3127,8 @@ document.addEventListener('keydown', e => {
   else if (k === 'ArrowLeft'){ if (playing) pause(); seek(snapFrame(playhead) - (e.shiftKey ? 1 : 1 / fps)); }
   else if (k === 'ArrowRight'){ if (playing) pause(); seek(snapFrame(playhead) + (e.shiftKey ? 1 : 1 / fps)); }
   else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === 'z'){ e.preventDefault(); undo(); }
+  else if (k === 'f' || k === 'F') fsOn() ? exitFs() : enterFs();
+  else if (k === 'Escape' && fsOn()) exitFs();
   else if (k === 'i' || k === 'I') setMark('in');
   else if (k === 'o' || k === 'O') setMark('out');
   else if (k === 's' || k === 'S'){ const r = clipAt(playhead); if (r) split(r.c); }
