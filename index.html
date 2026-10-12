@@ -29,6 +29,7 @@ header label{color:var(--dim);font-size:13px;display:flex;align-items:center;gap
 .stage{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000;overflow:hidden;border-radius:4px}
 .stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0}
 .stage video.on{opacity:1}
+#o2,#o3{background:#000}   /* V2/V3 tapan todo el cuadro, igual que en la exportación */
 .stage .empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);text-align:center;padding:20px}
 .transport{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--panel);border-top:1px solid var(--line)}
 .tc{font:600 17px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;min-width:118px}
@@ -86,6 +87,8 @@ input[type=file]{display:none}
 <div class="stagewrap"><div class="stage" id="stage">
   <video id="vA" playsinline preload="auto"></video>
   <video id="vB" playsinline preload="auto"></video>
+  <video id="o2" playsinline preload="auto"></video>
+  <video id="o3" playsinline preload="auto"></video>
   <canvas id="gfx"></canvas>
   <div class="empty" id="empty">Agregá videos con <b>&nbsp;+ Video&nbsp;</b>.<br>Se ubican uno detrás del otro en el orden en que los elijas.</div>
 </div></div>
@@ -2029,7 +2032,8 @@ if (typeof module === "object" && typeof module.exports === "object") Object.ass
 // ---------- estado ----------
 const $ = id => document.getElementById(id);
 const PEAKS_PER_SEC = 60;
-let clips = [];          // {id, media, in, out, vol}; media = null es un hueco (negro, sin audio)
+let clips = [];          // V1, en fila: {id, media, in, out, vol}; media = null es un hueco (negro, sin audio)
+let over = [];           // V2/V3, con tiempo fijo: {id, media, in, out, vol, track: 2|3, start}; tapan lo de abajo
 let music = null;        // {media, offset, vol}
 let texts = [];          // gráfica: {id, start, dur, text, color, size, x, y, font, bold, style, align, animIn, inDur, animOut, outDur}
 let selection = null;    // {type:'clip', id} | {type:'music'}
@@ -2041,7 +2045,11 @@ let uid = 1;
 const audioDecodeCtx = () => new OfflineAudioContext(2, 1, 48000);
 
 const clipDur = c => c.out - c.in;
-const total = () => clips.reduce((s, c) => s + clipDur(c), 0);
+const v1Total = () => clips.reduce((s, c) => s + clipDur(c), 0);
+const total = () => over.reduce((m, c) => Math.max(m, c.start + clipDur(c)), v1Total());
+const overAt = (k, t) => over.find(c => c.track === k && t >= c.start - 1e-6 && t < c.start + clipDur(c) - 1e-6);
+const maxTrack = () => over.reduce((m, c) => Math.max(m, c.track), 1);
+function clipStart(c){ return c.track ? c.start : starts()[clips.indexOf(c)]; }
 function starts(){ let s = 0; return clips.map(c => { const r = s; s += clipDur(c); return r; }); }
 function clipAt(t){
   let s = 0;
@@ -2049,7 +2057,7 @@ function clipAt(t){
   if (clips.length){ const i = clips.length - 1; return {i, c: clips[i], start: s - clipDur(clips[i]), atEnd: true}; }
   return null;
 }
-const selClip = () => selection && selection.type === 'clip' ? clips.find(c => c.id === selection.id) : null;
+const selClip = () => selection && selection.type === 'clip' ? (clips.find(c => c.id === selection.id) || over.find(c => c.id === selection.id)) : null;
 
 function fmtTC(t, signed){
   const neg = t < -1e-9; t = Math.abs(t);
@@ -2065,11 +2073,11 @@ let toastT;
 function toast(msg, ms = 2400){ const el = $('toast'); el.textContent = msg; el.style.opacity = 1; clearTimeout(toastT); toastT = setTimeout(() => el.style.opacity = 0, ms); }
 
 // ---------- deshacer ----------
-function snapshot(){ return {clips: clips.map(c => ({...c})), music: music ? {...music} : null, selection: selection ? {...selection} : null, markIn, markOut, texts: texts.map(x => ({...x}))}; }
+function snapshot(){ return {clips: clips.map(c => ({...c})), music: music ? {...music} : null, selection: selection ? {...selection} : null, markIn, markOut, texts: texts.map(x => ({...x})), over: over.map(c => ({...c}))}; }
 function pushUndo(){ undoStack.push(snapshot()); if (undoStack.length > 60) undoStack.shift(); $('undo').disabled = false; }
 function undo(){
   const s = undoStack.pop(); if (!s) return;
-  clips = s.clips; music = s.music; selection = s.selection; markIn = s.markIn; markOut = s.markOut; texts = s.texts || [];
+  clips = s.clips; music = s.music; selection = s.selection; markIn = s.markIn; markOut = s.markOut; texts = s.texts || []; over = s.over || [];
   if (music) loadMusicEl(); else { $('aud').removeAttribute('src'); }
   $('undo').disabled = !undoStack.length;
   playhead = Math.min(playhead, total()); afterEdit();
@@ -2195,8 +2203,9 @@ function quietSeek(v, t){
   v.onseeked = () => { v._seeking = false; if (v._pending != null){ const p = v._pending; v._pending = null; quietSeek(v, p); } };
 }
 function previewAt(t){
-  const r = clipAt(t);
-  $('empty').style.display = r ? 'none' : '';
+  syncOver();
+  const r = t < v1Total() - 1e-6 || !over.length ? clipAt(t) : null;
+  $('empty').style.display = clips.length || over.length ? 'none' : '';
   if (!r){ show(null); return; }
   if (!r.c.media){ show(null); return; }
   const v = elFor(r.c.media, false);
@@ -2208,7 +2217,7 @@ function previewAt(t){
 let raf = 0, cur = null, lastDraw = 0;
 // Reproducción: el video que está sonando marca el tiempo (no el reloj), así nunca se lo fuerza a saltar.
 function play(){
-  if (!clips.length) return;
+  if (!total()) return;
   if (playhead >= total() - 1e-3) playhead = 0;
   playing = true; cur = null; setPlayIcon();
   raf = requestAnimationFrame(tick);
@@ -2216,44 +2225,47 @@ function play(){
 function pause(){
   playing = false; cur = null; cancelAnimationFrame(raf);
   vA.pause(); vB.pause(); aud.pause(); aud.playbackRate = 1;
+  for (const v of [o2, o3]){ v.pause(); v.playbackRate = 1; }
   playhead = snapFrame(playhead); setPlayIcon(); previewAt(playhead); drawTL(); updTC();
 }
 function setPlayIcon(){ $('playIco').innerHTML = playing ? '<path d="M7 4h3v16H7zM14 4h3v16h-3z" fill="currentColor"/>' : '<path d="M7 4v16l13-8z" fill="currentColor"/>'; }
+// Después del final de V1 (si V2/V3 siguen) se reproduce un hueco virtual hasta el final.
+function tailGap(from, t){ return {c: {media: null, in: 0, out: total() - from}, v: null, t0: performance.now(), l0: t - from, st: from, i: clips.length}; }
 function startClipAt(t){
+  const T1 = v1Total();
+  if (t >= T1 - 1e-6){ show(null); return total() - t > 1e-3 ? tailGap(T1, t) : null; }
   const r = clipAt(t); if (!r) return null;
-  if (!r.c.media){ show(null); return {c: r.c, v: null, t0: performance.now(), l0: t - r.start}; }
+  if (!r.c.media){ show(null); return {c: r.c, v: null, t0: performance.now(), l0: t - r.start, st: r.start, i: r.i}; }
   const v = elFor(r.c.media, false);
   show(v);
   const want = r.c.in + (t - r.start);
   if (Math.abs(v.currentTime - want) > 0.02) v.currentTime = want;
   v.volume = Math.min(1, Math.max(0, r.c.vol));
   v.play().catch(()=>{});
-  return {c: r.c, v};
+  return {c: r.c, v, st: r.start, i: r.i};
 }
-function goNext(i){
+function goNext(i, end){
   const prev = clips[i], nx = clips[i + 1];
-  if (!nx) return null;
-  if (!nx.media){ show(null); return {c: nx, v: null, t0: performance.now(), l0: 0}; }
+  if (!nx){ if (i < clips.length && total() - end > 1e-3){ show(null); return tailGap(end, end); } return null; }
+  if (!nx.media){ show(null); return {c: nx, v: null, t0: performance.now(), l0: 0, st: end, i: i + 1}; }
   // mismo archivo y continuo (ej. clip dividido): seguir sin cortar
-  if (cur.v && prev.media && nx.media.id === prev.media.id && Math.abs(nx.in - prev.out) < 1.5 / fps){ cur.v.volume = Math.min(1, Math.max(0, nx.vol)); return {c: nx, v: cur.v}; }
+  if (cur.v && prev.media && nx.media.id === prev.media.id && Math.abs(nx.in - prev.out) < 1.5 / fps){ cur.v.volume = Math.min(1, Math.max(0, nx.vol)); return {c: nx, v: cur.v, st: end, i: i + 1}; }
   const v = elFor(nx.media, true);
   if (Math.abs(v.currentTime - nx.in) > 0.02) v.currentTime = nx.in;
   v.volume = Math.min(1, Math.max(0, nx.vol));
   v.play().catch(()=>{});
   show(v);
-  return {c: nx, v};
+  return {c: nx, v, st: end, i: i + 1};
 }
 function tick(now){
   if (!playing) return;
   if (!cur){ cur = startClipAt(playhead); if (!cur){ pause(); return; } }
-  let i = clips.indexOf(cur.c);
-  if (i < 0){ cur = startClipAt(playhead); if (!cur){ pause(); return; } i = clips.indexOf(cur.c); }
-  const st = starts()[i], c = cur.c, v = cur.v;
+  const {st, i, c, v} = cur;
   // en un hueco no hay video: el reloj es performance.now()
   const local = v ? v.currentTime : c.in + cur.l0 + (now - cur.t0) / 1000;
   if (local >= c.out - 0.5 / fps || (v && v.ended)){
-    const n = goNext(i);
-    if (!n){ playhead = total(); pause(); return; }
+    const n = goNext(i, st + clipDur(c));
+    if (!n){ playhead = Math.min(st + clipDur(c), total()); pause(); return; }
     cur = n; playhead = st + clipDur(c);
   } else {
     playhead = st + Math.max(0, local - c.in);
@@ -2265,9 +2277,37 @@ function tick(now){
       else if (o.paused && !o.seeking && Math.abs(o.currentTime - nx.in) > 0.05) o.currentTime = nx.in;
     }
   }
-  syncMusic(); drawGfx();
+  syncOver(); syncMusic(); drawGfx();
   if (now - lastDraw > 60){ lastDraw = now; updTC(); drawTL(); }
   raf = requestAnimationFrame(tick);
+}
+// V2/V3: cada pista tiene su reproductor; se sincroniza al cursor con correcciones suaves (como la música).
+const o2 = $('o2'), o3 = $('o3'), oV = {2: o2, 3: o3};
+function syncOver(){
+  for (const k of [2, 3]){
+    const v = oV[k], c = overAt(k, playhead);
+    if (!c){
+      v.classList.remove('on'); if (!v.paused) v.pause();
+      if (playing){   // precargar el próximo de esta pista
+        const nx = over.filter(q => q.track === k && q.start > playhead && q.start - playhead < 2.5).sort((a, b) => a.start - b.start)[0];
+        if (nx){ if (v._mid !== nx.media.id){ v._mid = nx.media.id; v.src = nx.media.url; v.currentTime = nx.in; } else if (!v.seeking && Math.abs(v.currentTime - nx.in) > .05) v.currentTime = nx.in; }
+      }
+      continue;
+    }
+    const want = c.in + (playhead - c.start);
+    if (v._mid !== c.media.id){ v.pause(); v._mid = c.media.id; v.src = c.media.url; v._seeking = false; v._pending = null; v.currentTime = want; }
+    v.volume = Math.min(1, Math.max(0, c.vol));
+    if (playing){
+      if (v.paused){ if (!v.seeking && Math.abs(v.currentTime - want) > .05) v.currentTime = want; v.playbackRate = 1; v.play().catch(()=>{}); }
+      else {
+        const d = v.currentTime - want;
+        if (Math.abs(d) > .3){ v.currentTime = want; v.playbackRate = 1; }
+        else if (Math.abs(d) > .04) v.playbackRate = 1 - Math.max(-.08, Math.min(.08, d * .6));
+        else if (v.playbackRate !== 1) v.playbackRate = 1;
+      }
+    } else { if (!v.paused) v.pause(); quietSeek(v, want); }
+    v.classList.toggle('on', v.readyState >= 2);
+  }
 }
 function syncMusic(){
   if (!music) return;
@@ -2284,7 +2324,7 @@ function syncMusic(){
 }
 function seek(t){
   playhead = Math.max(0, Math.min(total(), t));
-  if (playing){ cur = null; vA.pause(); vB.pause(); aud.pause(); }
+  if (playing){ cur = null; vA.pause(); vB.pause(); aud.pause(); o2.pause(); o3.pause(); }
   else previewAt(playhead);
   updTC(); drawTL();
 }
@@ -2292,7 +2332,22 @@ function updTC(){ $('tc').firstChild.nodeValue = fmtTC(playhead); $('tcd').textC
 
 // ---------- línea de tiempo ----------
 const cv = $('tl'), g = cv.getContext('2d');
-const L = {ruler: 24, gTop: 30, gH: 36, vTop: 72, thumbH: 54, waveH: 26, mTop: 162, mH: 52};
+const L = {ruler: 24, gTop: 30, gH: 36, vTop: 72, thumbH: 54, waveH: 26, mTop: 162, mH: 52, ov: {}};
+// Pistas V2/V3: se muestran las usadas más una vacía arriba (hasta V3) para soltar clips y sumar pista.
+function layoutTL(){
+  const top = Math.min(3, maxTrack() + 1); let y = 72; L.ov = {};
+  for (let k = top; k >= 2; k--){ const empty = k > maxTrack(), h = empty ? 34 : 54; L.ov[k] = {top: y, h, empty}; y += h + 6; }
+  L.vTop = y; L.mTop = y + L.thumbH + L.waveH + 10;
+  const hh = L.mTop + L.mH + 8;
+  if (cv.style.height !== hh + 'px'){ cv.style.height = hh + 'px'; if (W) resize(); }
+}
+function laneAt(y){
+  if (y >= L.vTop - 3) return 1;
+  const ks = Object.keys(L.ov).map(Number).sort((a, b) => b - a);
+  for (const k of ks) if (y >= L.ov[k].top - 3 && y <= L.ov[k].top + L.ov[k].h + 3) return k;
+  return ks.length ? (y < L.ov[ks[0]].top ? ks[0] : 2) : 1;
+}
+const laneBox = k => k === 1 ? {top: L.vTop, h: L.thumbH + L.waveH} : L.ov[k];
 let W = 0, H = 0, dpr = 1;
 let drag = null;       // estado de arrastre
 let snapLine = null;
@@ -2319,32 +2374,33 @@ function drawWave(peaks, srcT0, srcT1, x0, x1, yMid, half, color){
     g.fillRect(x, yMid - h, 1, h * 2);
   }
 }
-function drawClip(c, x, w, alpha, selected){
-  const y = L.vTop, m = c.media;
+function drawClip(c, x, w, alpha, selected, y = L.vTop, thumbH = L.thumbH, waveH = L.waveH){
+  const m = c.media;
   if (!m){
+    if (selected && alpha === 1){ g.fillStyle = '#f5b33d'; g.fillRect(x + w - 8, y + 8, 5, thumbH + waveH - 16); }
     g.save(); g.globalAlpha = alpha;
-    roundRect(x, y, w, L.thumbH + L.waveH, 6); g.fillStyle = '#0d0e10'; g.fill();
+    roundRect(x, y, w, thumbH + waveH, 6); g.fillStyle = '#0d0e10'; g.fill();
     g.setLineDash([4, 4]); g.lineWidth = selected ? 2.5 : 1; g.strokeStyle = selected ? '#f5b33d' : '#3a3f48'; g.stroke(); g.setLineDash([]);
     if (w > 40){ g.fillStyle = '#6b707a'; g.font = '11px system-ui'; g.fillText('negro', x + 8, y + 18, w - 12); }
     g.restore(); return;
   }
   g.save(); g.globalAlpha = alpha;
-  roundRect(x, y, w, L.thumbH + L.waveH, 6); g.fillStyle = '#26354f'; g.fill(); g.clip();
+  roundRect(x, y, w, thumbH + waveH, 6); g.fillStyle = '#26354f'; g.fill(); g.clip();
   // miniaturas
   if (m.thumbs.length){
-    const tw = Math.max(20, L.thumbH * m.w / m.h);
+    const tw = Math.max(20, thumbH * m.w / m.h);
     const first = Math.max(x, Math.floor((0 - x) / tw) * tw + x);
     for (let tx = first; tx < Math.min(x + w, W); tx += tw){
       const st = c.in + (tx - x + tw / 2) / pps;
       const idx = Math.min(m.thumbs.length - 1, Math.max(0, Math.floor(st / m.thumbStep)));
       const im = m.thumbs[idx] || m.thumbs.find(Boolean);
-      if (im) g.drawImage(im, tx, y, tw, L.thumbH);
+      if (im) g.drawImage(im, tx, y, tw, thumbH);
     }
   }
   // audio del clip
-  g.fillStyle = '#1c2638'; g.fillRect(x, y + L.thumbH, w, L.waveH);
-  if (m.peaks) drawWave(m.peaks, c.in, c.out, x, x + w, y + L.thumbH + L.waveH / 2, L.waveH / 2 - 2, c.vol > 0 ? '#8fb3ee' : '#4a5a77');
-  else { g.fillStyle = '#6b7a95'; g.font = '11px system-ui'; g.fillText(m.audioState === 'loading' ? 'leyendo audio…' : 'sin audio', x + 6, y + L.thumbH + 17); }
+  g.fillStyle = '#1c2638'; g.fillRect(x, y + thumbH, w, waveH);
+  if (m.peaks) drawWave(m.peaks, c.in, c.out, x, x + w, y + thumbH + waveH / 2, waveH / 2 - 2, c.vol > 0 ? '#8fb3ee' : '#4a5a77');
+  else { g.fillStyle = '#6b7a95'; g.font = '11px system-ui'; g.fillText(m.audioState === 'loading' ? 'leyendo audio…' : 'sin audio', x + 6, y + thumbH + 17); }
   // nombre
   if (w > 50){
     g.font = '600 11px system-ui'; const label = m.name;
@@ -2353,8 +2409,12 @@ function drawClip(c, x, w, alpha, selected){
     g.fillStyle = '#fff'; g.fillText(label, x + 9, y + 16, tw - 10);
   }
   g.restore();
-  roundRect(x + .5, y + .5, w - 1, L.thumbH + L.waveH - 1, 6);
+  roundRect(x + .5, y + .5, w - 1, thumbH + waveH - 1, 6);
   g.lineWidth = selected ? 2.5 : 1; g.strokeStyle = selected ? '#f5b33d' : '#0b0c0e'; g.stroke();
+  if (selected && alpha === 1){   // bordes de trim
+    g.fillStyle = '#f5b33d'; g.fillRect(x + 3, y + 8, 5, thumbH + waveH - 16); g.fillRect(x + w - 8, y + 8, 5, thumbH + waveH - 16);
+    g.fillStyle = '#000'; for (const bx of [x + 4.5, x + w - 6.5]) for (let k = -1; k <= 1; k++) g.fillRect(bx, y + (thumbH + waveH) / 2 + k * 5 - .5, 2, 1.5);
+  }
 }
 function drawTextClip(tx, sel){
   const x = xOf(tx.start), w = tx.dur * pps, y = L.gTop, h = L.gH;
@@ -2398,6 +2458,16 @@ function drawTL(){
   // fondo de pistas
   g.fillStyle = '#16181c';
   g.fillRect(0, L.gTop, W, L.gH); g.fillRect(0, L.vTop, W, L.thumbH + L.waveH); g.fillRect(0, L.mTop, W, L.mH);
+  for (const k in L.ov){
+    const o = L.ov[k];
+    if (o.empty){
+      g.save(); g.setLineDash([5, 5]); g.strokeStyle = '#3a3f48'; g.strokeRect(.5, o.top + .5, W - 1, o.h - 1); g.restore();
+      g.fillStyle = '#5c616b'; g.font = '12px system-ui'; g.fillText(`V${k} · subí un clip acá para sumar una pista`, W / 2 + 12, o.top + 21);
+    } else { g.fillStyle = '#16181c'; g.fillRect(0, o.top, W, o.h); }
+  }
+  g.fillStyle = '#ffffff40'; g.font = '700 10px system-ui';
+  for (const k in L.ov) if (!L.ov[k].empty) g.fillText('V' + k, 4, L.ov[k].top + 12);
+  if (Object.keys(L.ov).length > 1 || !L.ov[2] || !L.ov[2].empty) g.fillText('V1', 4, L.vTop + 12);
   // zona fuera del montaje
   const xe = xOf(T); if (xe < W){ g.fillStyle = '#0006'; g.fillRect(Math.max(0, xe), L.vTop, W, L.thumbH + L.waveH); }
   const xs = xOf(0); if (xs > 0){ g.fillStyle = '#0006'; g.fillRect(0, L.vTop, xs, L.thumbH + L.waveH); }
@@ -2406,9 +2476,16 @@ function drawTL(){
   clips.forEach((c, i) => {
     const x = xOf(st[i]), w = clipDur(c) * pps;
     if (x > W || x + w < 0) return;
-    if (drag && drag.mode === 'reorder' && drag.clip === c){ g.fillStyle = '#ffffff10'; roundRect(x, L.vTop, w, L.thumbH + L.waveH, 6); g.fill(); return; }
+    if (drag && drag.mode === 'move' && drag.clip === c){ g.fillStyle = '#ffffff10'; roundRect(x, L.vTop, w, L.thumbH + L.waveH, 6); g.fill(); return; }
     drawClip(c, x, w, 1, sc === c);
   });
+  for (const c of over){
+    const o = L.ov[c.track]; if (!o) continue;
+    const x = xOf(c.start), w = clipDur(c) * pps;
+    if (x > W || x + w < 0) continue;
+    if (drag && drag.mode === 'move' && drag.clip === c){ g.fillStyle = '#ffffff10'; roundRect(x, o.top, w, o.h, 6); g.fill(); continue; }
+    drawClip(c, x, w, 1, sc === c, o.top, 40, 14);
+  }
   if (!clips.length){ g.fillStyle = '#6b707a'; g.font = '13px system-ui'; g.fillText('Pista de video vacía', W / 2 + 12, L.vTop + 44); }
   // gráfica
   const stx = selText();
@@ -2427,10 +2504,13 @@ function drawTL(){
     roundRect(x + .5, L.mTop + .5, w - 1, L.mH - 1, 6); g.lineWidth = sel ? 2.5 : 1; g.strokeStyle = sel ? '#f5b33d' : '#0b0c0e'; g.stroke();
   } else { g.fillStyle = '#6b707a'; g.font = '13px system-ui'; g.fillText('Pista de música vacía', W / 2 + 12, L.mTop + 31); }
   // clip arrastrado
-  if (drag && drag.mode === 'reorder'){
-    const c = drag.clip, w = clipDur(c) * pps, x = drag.px - drag.grabDx;
-    g.save(); g.shadowColor = '#000'; g.shadowBlur = 14; drawClip(c, x, w, .85, true); g.restore();
-    const ix = xOf(drag.insertT); g.fillStyle = '#f5b33d'; g.fillRect(ix - 1.5, L.vTop - 4, 3, L.thumbH + L.waveH + 8);
+  if (drag && drag.mode === 'move' && drag.target){
+    const c = drag.clip, w = clipDur(c) * pps, k = drag.target, b = laneBox(k);
+    const x = k === 1 ? drag.px - drag.grabDx : xOf(drag.start);
+    g.save(); g.shadowColor = '#000'; g.shadowBlur = 14;
+    if (k === 1) drawClip(c, x, w, .85, true); else drawClip(c, x, w, .85, true, b.top, b.h === 54 ? 40 : 24, b.h === 54 ? 14 : 10);
+    g.restore();
+    if (k === 1){ const ix = xOf(drag.insertT); g.fillStyle = '#f5b33d'; g.fillRect(ix - 1.5, L.vTop - 4, 3, L.thumbH + L.waveH + 8); }
   }
   if (snapLine != null){ g.fillStyle = '#fff'; g.fillRect(Math.round(xOf(snapLine)), L.gTop, 1, L.mTop + L.mH - L.gTop); }
   // marcas de entrada / salida
@@ -2567,6 +2647,61 @@ gfx.addEventListener('pointermove', e => {
 const gEnd = () => { if (!gdrag) return; gdrag = null; gGuide = false; drawGfx(); };
 gfx.addEventListener('pointerup', gEnd); gfx.addEventListener('pointercancel', gEnd);
 
+// ---------- trim y mover entre pistas ----------
+function snapT(v, self){
+  const cands = [0, playhead, ...cutPoints(self)], tol = 10 / pps;
+  for (const c of cands) if (Math.abs(v - c) < tol){ snapLine = c; return c; }
+  return snapFrame(v);
+}
+// En V1 el trim junta lo que sigue; en V2/V3 el clip se queda donde está.
+function dragTrim(c, o, zone, st, dt){
+  const min = 2 / fps, maxOut = c.media ? c.media.duration : Infinity; snapLine = null;
+  c.in = o.in; c.out = o.out; if (c.track) c.start = o.start;
+  if (zone === 'trimL'){
+    let nin = c.track ? o.in + (snapT(o.start + dt, c) - o.start) : snapFrame(o.in + dt);
+    nin = Math.max(0, Math.min(o.out - min, nin));
+    if (c.track){ c.start = o.start + (nin - o.in); if (c.start < 0){ nin -= c.start; c.start = 0; } }
+    c.in = nin;
+    trimFrame(c, c.in);
+  } else {
+    let nout = o.in + (snapT(st + (o.out - o.in) + dt, c) - st);
+    c.out = Math.max(o.in + min, Math.min(maxOut, nout));
+    trimFrame(c, c.out - 1 / fps);
+  }
+}
+function trimFrame(c, t){   // el visor muestra el cuadro del borde mientras se recorta
+  if (!c.media) return;
+  o2.classList.remove('on'); o3.classList.remove('on');
+  const v = elFor(c.media, false); show(v); quietSeek(v, Math.max(0, t));
+}
+// Encima en V2/V3 pisa lo que haya en esa pista (como sobrescribir).
+function overwrite(k, a, b, self){
+  const out = [];
+  for (const q of over){
+    if (q === self || q.track !== k){ out.push(q); continue; }
+    const qs = q.start, qe = q.start + clipDur(q);
+    if (qe <= a + 1e-6 || qs >= b - 1e-6){ out.push(q); continue; }
+    if (qs < a) out.push({...q, out: q.in + (a - qs)});
+    if (qe > b) out.push({...q, id: q.id === undefined || qs < a ? uid++ : q.id, in: q.in + (b - qs), start: b});
+  }
+  over = out;
+}
+function moveClipTo(c, k, idx, start){
+  if (c.track) over.splice(over.indexOf(c), 1); else clips.splice(clips.indexOf(c), 1);
+  if (k === 1){ delete c.track; delete c.start; clips.splice(Math.min(idx, clips.length), 0, c); }
+  else { c.track = k; c.start = snapFrame(start); overwrite(k, c.start, c.start + clipDur(c), c); over.push(c); }
+  // si V2 queda vacía y V3 tiene clips, V3 baja
+  if (!over.some(q => q.track === 2)) over.forEach(q => q.track = 2);
+  selection = {type: 'clip', id: c.id};
+  afterEdit();
+}
+function removeClip(c){
+  pushUndo();
+  if (c.track) over.splice(over.indexOf(c), 1); else clips.splice(clips.indexOf(c), 1);
+  if (!over.some(q => q.track === 2)) over.forEach(q => q.track = 2);
+  selection = null; afterEdit();
+}
+
 // ---------- gestos ----------
 const pts = new Map();
 let pinch = null;
@@ -2586,9 +2721,21 @@ function hit(x, y){
       return {type: 'text', tx, zone};
     }
   }
-  if (y >= L.vTop && y <= L.vTop + L.thumbH + L.waveH){
-    const t = tOf(x), st = starts();
-    for (let i = 0; i < clips.length; i++) if (t >= st[i] && t < st[i] + clipDur(clips[i])) return {type: 'clip', c: clips[i], i, start: st[i]};
+  const k = laneAt(y), b = laneBox(k);
+  if (b && !b.empty && y >= b.top && y <= b.top + b.h){
+    const t = tOf(x), sc = selClip(), tol = 18 / pps, st = starts();
+    const list = k === 1 ? clips.map((c, i) => ({c, s: st[i]})) : over.filter(c => c.track === k).map(c => ({c, s: c.start}));
+    const sel = list.find(q => q.c === sc);
+    const f = (sel && t >= sel.s - tol && t <= sel.s + clipDur(sel.c) + tol) ? sel : list.find(q => t >= q.s && t < q.s + clipDur(q.c));
+    if (f){
+      let zone = 'move';
+      if (f.c === sc){
+        const xs = xOf(f.s), xe = xOf(f.s + clipDur(f.c)), m = Math.min(18, (xe - xs) / 3);
+        if (Math.abs(x - xs) < m + 4 && x < xs + m && f.c.media) zone = 'trimL';
+        else if (Math.abs(x - xe) < m + 4 && x > xe - m) zone = 'trimR';
+      }
+      return {type: 'clip', c: f.c, start: f.s, track: k, zone};
+    }
   }
   if (music && y >= L.mTop && y <= L.mTop + L.mH){ const t = tOf(x); if (t >= music.offset && t <= music.offset + music.media.duration) return {type: 'music'}; }
   if (y < L.ruler) return {type: 'ruler'};
@@ -2619,8 +2766,11 @@ cv.addEventListener('pointermove', e => {
   if (!drag.mode){
     if (Math.abs(dx) < 7 && Math.abs(y - drag.y0) < 7) return;
     const h = drag.h, sc = selClip();
-    if (h && h.type === 'clip' && sc === h.c && clips.length > 1){
-      drag.mode = 'reorder'; drag.clip = h.c; drag.grabDx = drag.x0 - xOf(h.start); pushUndo();
+    if (h && h.type === 'clip' && sc === h.c && h.zone !== 'move'){
+      if (playing) pause();
+      drag.mode = 'trim'; drag.clip = h.c; drag.o = {...h.c}; drag.st = h.start; pushUndo();
+    } else if (h && h.type === 'clip' && sc === h.c){
+      drag.mode = 'move'; drag.clip = h.c; drag.grabDx = drag.x0 - xOf(h.start);
     } else if (h && h.type === 'text' && selText() === h.tx){
       drag.mode = 'text'; drag.o = {...h.tx}; pushUndo();
     } else if (h && h.type === 'music' && selection && selection.type === 'music'){
@@ -2630,7 +2780,7 @@ cv.addEventListener('pointermove', e => {
   if (drag.mode === 'scrub'){ seek(drag.ph0 - dx / pps); }
   else if (drag.mode === 'music'){
     let off = drag.off0 + dx / pps; snapLine = null;
-    const cands = [0, playhead, ...starts(), total()]; const tol = 8 / pps;
+    const cands = [0, playhead, ...cutPoints()]; const tol = 8 / pps;
     for (const c of cands){
       if (Math.abs(off - c) < tol){ off = c; snapLine = c; break; }
       if (Math.abs(off + music.media.duration - c) < tol){ off = c - music.media.duration; snapLine = c; break; }
@@ -2638,12 +2788,22 @@ cv.addEventListener('pointermove', e => {
     music.offset = snapFrame(off); drawTL(); updInspector();
   } else if (drag.mode === 'text'){
     dragText(drag.h.tx, drag.o, drag.h.zone, dx / pps); drawTL();
-  } else if (drag.mode === 'reorder'){
-    // auto-desplazamiento cerca de los bordes
-    const t = tOf(x - drag.grabDx + clipDur(drag.clip) * pps / 2);
-    const others = clips.filter(c => c !== drag.clip); let s = 0, idx = others.length;
-    for (let i = 0; i < others.length; i++){ const d = clipDur(others[i]); if (t < s + d / 2){ idx = i; break; } s += d; }
-    drag.insertIdx = idx; drag.insertT = others.slice(0, idx).reduce((a, c) => a + clipDur(c), 0);
+  } else if (drag.mode === 'trim'){
+    dragTrim(drag.clip, drag.o, drag.h.zone, drag.st, dx / pps); drawTL();
+  } else if (drag.mode === 'move'){
+    const c = drag.clip;
+    drag.target = c.media ? laneAt(y) : 1;   // un hueco negro solo puede quedarse en V1
+    snapLine = null;
+    if (drag.target === 1){
+      const t = tOf(x - drag.grabDx + clipDur(c) * pps / 2);
+      const others = clips.filter(q => q !== c); let s = 0, idx = others.length;
+      for (let i = 0; i < others.length; i++){ const d = clipDur(others[i]); if (t < s + d / 2){ idx = i; break; } s += d; }
+      drag.insertIdx = idx; drag.insertT = others.slice(0, idx).reduce((a, q) => a + clipDur(q), 0);
+    } else {
+      const d = clipDur(c); let st = tOf(x - drag.grabDx);
+      const e = snapT(st + d, c); st = snapLine != null ? e - d : snapT(st, c);
+      drag.start = Math.max(0, st);
+    }
     drawTL();
   }
 });
@@ -2660,10 +2820,8 @@ function endPointer(e){
     else if (h.type === 'music'){ selection = (selection && selection.type === 'music') ? null : {type: 'music'}; }
     updInspector(); drawTL(); return;
   }
-  if (d.mode === 'reorder' && d.insertIdx != null){
-    const others = clips.filter(c => c !== d.clip); others.splice(d.insertIdx, 0, d.clip); clips = others;
-    afterEdit();
-  } else if (d.mode === 'music' || d.mode === 'text'){ afterEdit(); }
+  if (d.mode === 'move' && d.target){ pushUndo(); moveClipTo(d.clip, d.target, d.insertIdx, d.start); }
+  else if (d.mode === 'music' || d.mode === 'text' || d.mode === 'trim'){ afterEdit(); }
   else if (d.mode === 'scrub'){ seek(snapFrame(playhead)); }
   drawTL();
 }
@@ -2687,23 +2845,27 @@ function updInspector(){
   if (sc && !sc.media){
     const info = document.createElement('div');
     info.innerHTML = `<div class="name">Negro</div><div class="meta">${fmtTC(clipDur(sc))}</div>`;
-    box.append(info, sep(), btn('Cerrar hueco', () => { pushUndo(); clips.splice(clips.indexOf(sc), 1); selection = null; afterEdit(); }, 'danger'));
+    box.append(info, sep(), btn('Cerrar hueco', () => removeClip(sc), 'danger'));
   } else if (sc){
-    const st = starts()[clips.indexOf(sc)], inside = playhead > st + 1e-3 && playhead < st + clipDur(sc) - 1e-3;
+    const st = clipStart(sc), inside = playhead > st + 1e-3 && playhead < st + clipDur(sc) - 1e-3;
     const info = document.createElement('div');
-    info.innerHTML = `<div class="name">${esc(sc.media.name)}</div><div class="meta">${fmtTC(clipDur(sc))} · origen ${fmtTC(sc.in)}–${fmtTC(sc.out)}</div>`;
+    info.innerHTML = `<div class="name">${esc(sc.media.name)}</div><div class="meta">V${sc.track || 1} · ${fmtTC(clipDur(sc))} · origen ${fmtTC(sc.in)}–${fmtTC(sc.out)}</div>`;
     box.append(info, sep());
     const g1 = grp();
     const bi = btn('Cortar inicio', () => trimIn(sc)), bo = btn('Cortar final', () => trimOut(sc)), bs = btn('Dividir', () => split(sc));
     [bi, bo, bs].forEach(b => b.disabled = !inside);
     g1.append(bi, bo, bs); box.append(g1, sep());
-    const i = clips.indexOf(sc);
-    const g2 = grp(); const bl = btn('◀', () => moveClip(sc, -1), 'icon'), br = btn('▶', () => moveClip(sc, 1), 'icon');
-    bl.disabled = i === 0; br.disabled = i === clips.length - 1; g2.append(bl, br); box.append(g2, sep());
+    if (!sc.track){
+      const i = clips.indexOf(sc);
+      const g2 = grp(); const bl = btn('◀', () => moveClip(sc, -1), 'icon'), br = btn('▶', () => moveClip(sc, 1), 'icon');
+      bl.disabled = i === 0; br.disabled = i === clips.length - 1; g2.append(bl, br); box.append(g2, sep());
+    }
     box.append(volCtl(sc.vol, v => { sc.vol = v; drawTL(); }), sep());
     const bres = btn('Restaurar', () => { pushUndo(); sc.in = 0; sc.out = sc.media.duration; afterEdit(); }); bres.disabled = sc.in === 0 && sc.out === sc.media.duration;
-    box.append(bres, btn('Eliminar', () => { pushUndo(); clips.splice(clips.indexOf(sc), 1); selection = null; playhead = Math.min(playhead, total()); afterEdit(); }, 'danger'));
-    if (!inside){ const h = document.createElement('span'); h.className = 'hint'; h.textContent = 'Ubicá el cursor dentro del clip para cortar o dividir.'; box.append(h); }
+    box.append(bres, btn('Eliminar', () => removeClip(sc), 'danger'));
+    const h = document.createElement('span'); h.className = 'hint';
+    h.textContent = (inside ? '' : 'Ubicá el cursor dentro del clip para cortar o dividir. ') + 'Arrastrá los bordes amarillos para recortar; arrastrá el clip arriba o abajo para cambiarlo de pista.';
+    box.append(h);
   } else if (selection && selection.type === 'music' && music){
     const info = document.createElement('div');
     info.innerHTML = `<div class="name">♪ ${esc(music.media.name)}</div><div class="meta">empieza en ${fmtTC(music.offset, true)}</div>`;
@@ -2792,21 +2954,26 @@ function volCtl(val, set){
   d.append(lab, r); return d;
 }
 function nudge(n){ pushUndo(); music.offset = snapFrame(music.offset + n / fps); afterEdit(); if (!playing) previewAt(playhead); }
-function trimIn(c){ const st = starts()[clips.indexOf(c)]; pushUndo(); c.in = snapFrame(c.in + (playhead - st)); playhead = st; afterEdit(); }
-function trimOut(c){ const st = starts()[clips.indexOf(c)]; pushUndo(); c.out = snapFrame(c.in + (playhead - st)); afterEdit(); }
+function trimIn(c){
+  const st = clipStart(c); pushUndo(); c.in = snapFrame(c.in + (playhead - st));
+  if (c.track) c.start = snapFrame(playhead); else playhead = st;
+  afterEdit();
+}
+function trimOut(c){ const st = clipStart(c); pushUndo(); c.out = snapFrame(c.in + (playhead - st)); afterEdit(); }
 function split(c){
-  const i = clips.indexOf(c), st = starts()[i], cut = snapFrame(c.in + (playhead - st));
+  const st = clipStart(c), cut = snapFrame(c.in + (playhead - st));
   if (cut - c.in < 1 / fps || c.out - cut < 1 / fps) return;
-  pushUndo(); const b = {...c, id: uid++, in: cut}; c.out = cut; clips.splice(i + 1, 0, b); selection = {type: 'clip', id: b.id}; afterEdit();
+  pushUndo(); const b = {...c, id: uid++, in: cut}; c.out = cut;
+  if (c.track){ b.start = st + (cut - c.in); over.push(b); } else clips.splice(clips.indexOf(c) + 1, 0, b); selection = {type: 'clip', id: b.id}; afterEdit();
 }
 function moveClip(c, d){ const i = clips.indexOf(c), j = i + d; if (j < 0 || j >= clips.length) return; pushUndo(); clips.splice(i, 1); clips.splice(j, 0, c); afterEdit(); }
 function afterEdit(){
-  tidy();
+  tidy(); over = over.filter(c => clipDur(c) >= .5 / fps); layoutTL();
   playhead = Math.min(playhead, total());
   if (markIn != null && markIn > total()) markIn = null;
   if (markOut != null && markOut > total()) markOut = total();
-  $('export').disabled = !clips.length; $('empty').style.display = clips.length ? 'none' : '';
-  if (playing){ cur = null; vA.pause(); vB.pause(); }
+  $('export').disabled = !total(); $('empty').style.display = clips.length || over.length ? 'none' : '';
+  if (playing){ cur = null; vA.pause(); vB.pause(); o2.pause(); o3.pause(); }
   updInspector(); updTC(); drawTL(); if (!playing) previewAt(playhead);
 }
 function setMark(which){
@@ -2842,7 +3009,11 @@ function tidy(){
   }
   clips = out;
 }
-function cutPoints(){ const s = starts(); return [...s, total()]; }
+function cutPoints(self){
+  const s = starts(), p = [...s.filter((_, i) => clips[i] !== self), v1Total(), total()];
+  for (const c of over) if (c !== self) p.push(c.start, c.start + clipDur(c));
+  return [...new Set(p)].sort((a, b) => a - b);
+}
 
 // ---------- controles ----------
 $('addVid').onclick = () => $('fVid').click();
@@ -2870,7 +3041,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'o' || k === 'O') setMark('out');
   else if (k === 's' || k === 'S'){ const r = clipAt(playhead); if (r) split(r.c); }
   else if ((k === 'Delete' || k === 'Backspace') && selText()){ pushUndo(); texts.splice(texts.indexOf(selText()), 1); selection = null; afterEdit(); }
-  else if (k === 'Delete' || k === 'Backspace'){ const sc = selClip(); if (sc){ pushUndo(); clips.splice(clips.indexOf(sc), 1); selection = null; afterEdit(); } }
+  else if (k === 'Delete' || k === 'Backspace'){ const sc = selClip(); if (sc) removeClip(sc); }
 });
 window.addEventListener('resize', resize);
 new ResizeObserver(fitStage).observe(document.querySelector('.stagewrap'));
@@ -2919,6 +3090,23 @@ function openExport(){
 }
 $('export').onclick = openExport;
 
+// Video aplanado: en cada tramo se ve solo el clip de la pista más alta (V3 > V2 > V1).
+function segments(){
+  const T = total(), st = starts(), pts = new Set([0, T]);
+  clips.forEach((c, i) => { pts.add(st[i]); pts.add(st[i] + clipDur(c)); });
+  over.forEach(c => { pts.add(c.start); pts.add(c.start + clipDur(c)); });
+  const ts = [...pts].filter(t => t >= 0 && t <= T).sort((a, b) => a - b), segs = [];
+  for (let k = 0; k < ts.length - 1; k++){
+    const a = ts[k], b = ts[k + 1]; if (b - a < 1e-6) continue;
+    const m = (a + b) / 2; let c = overAt(3, m) || overAt(2, m), cs = c ? c.start : 0;
+    if (!c && m < v1Total()){ const r = clipAt(m); c = r.c; cs = r.start; }
+    const seg = c && c.media ? {media: c.media, in: c.in + (a - cs), out: c.in + (b - cs), src: c} : {media: null, in: 0, out: b - a, src: null};
+    const p = segs[segs.length - 1];
+    if (p && p.src === seg.src){ p.out += seg.out - seg.in; continue; }
+    segs.push(seg);
+  }
+  return segs;
+}
 async function runExport(short, F, q){
   const [w, h] = outSize(aspect, short);
   const bitrate = Math.round(w * h * F * 0.09 * q);
@@ -2953,6 +3141,12 @@ async function runExport(short, F, q){
           src.start(s, cl.in, d);
         }
         s += d;
+      }
+      for (const cl of over){
+        if (!cl.media.buffer || cl.vol <= 0) continue;
+        const src = oc.createBufferSource(); src.buffer = cl.media.buffer;
+        const gn = oc.createGain(); gn.gain.value = cl.vol; src.connect(gn).connect(oc.destination);
+        src.start(cl.start, cl.in, clipDur(cl));
       }
       if (music && music.vol > 0){
         const src = oc.createBufferSource(); src.buffer = music.media.buffer;
@@ -3000,10 +3194,11 @@ async function runExport(short, F, q){
     };
     const xv = $('xv');
     let start = 0;
-    for (let ci = 0; ci < clips.length; ci++){
-      const cl = clips[ci], d = clipDur(cl), endIdx = Math.round((start + d) * F);
+    const segs = segments();
+    for (let ci = 0; ci < segs.length; ci++){
+      const cl = segs[ci], d = clipDur(cl), endIdx = Math.round((start + d) * F);
       if (st.cancel) throw new Error('cancel');
-      setP(n / N, `Video: clip ${ci + 1} de ${clips.length}`);
+      setP(n / N, `Video: tramo ${ci + 1} de ${segs.length}`);
       if (!cl.media){ bx.fillStyle = '#000'; bx.fillRect(0, 0, w, h); encodeUntil(endIdx, start + d + 1); start += d; continue; }
       if (xv.src !== cl.media.url) await loadMeta(xv, cl.media.url);
       await seekTo(xv, cl.in);
@@ -3073,7 +3268,7 @@ function showDone(blob, w, h, F, vc, ac){
 }
 
 // ---------- inicio ----------
-setAspect('16:9'); resize(); updInspector(); updTC();
+setAspect('16:9'); layoutTL(); resize(); updInspector(); updTC();
 if (!window.isSecureContext || !('VideoEncoder' in window)) setTimeout(() => toast('Ojo: este navegador no va a poder exportar. Usá Chrome actualizado.', 6000), 600);
 </script>
 </body>
