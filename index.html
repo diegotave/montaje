@@ -27,9 +27,9 @@ header .spacer{flex:1}
 header label{color:var(--dim);font-size:13px;display:flex;align-items:center;gap:6px}
 .stagewrap{flex:1;min-height:0;position:relative;overflow:hidden;background:#0b0c0e}
 .stage{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000;overflow:hidden;border-radius:4px}
-.stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0}
+.stage video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:fill;opacity:0;transform-origin:50% 50%}
 .stage video.on{opacity:1}
-#o2,#o3{background:#000}
+#o2,#o3{box-shadow:0 0 0 200vmax #000}   /* V2/V3 tapan todo el cuadro, igual que en la exportación */
 /* pantalla completa */
 #fsUI{display:none}
 .stagewrap.fs{position:fixed;inset:0;z-index:30;background:#000}
@@ -2082,6 +2082,17 @@ const v1Total = () => clips.reduce((s, c) => s + clipDur(c), 0);
 const total = () => over.reduce((m, c) => Math.max(m, c.start + clipDur(c)), v1Total());
 const overAt = (k, t) => over.find(c => c.track === k && t >= c.start - 1e-6 && t < c.start + clipDur(c) - 1e-6);
 const maxTrack = () => over.reduce((m, c) => Math.max(m, c.track), 1);
+// Encuadre de cada clip: c.tf = {s escala, r giro en grados, x/y desplazamiento en fracción del cuadro, fill}.
+// Es inmutable (siempre se reemplaza el objeto) para que deshacer y dividir no compartan cambios.
+const TF0 = {s: 1, r: 0, x: 0, y: 0, fill: false};
+const tfOf = c => c.tf || TF0;
+function clipGeom(c, W, H){
+  const tf = tfOf(c), vw = c.media.w || 16, vh = c.media.h || 9;
+  const q = Math.round(tf.r / 90) % 2 !== 0;   // girado ~90°: se encuadra con los lados cambiados
+  const fw = q ? vh : vw, fh = q ? vw : vh;
+  const base = tf.fill ? Math.max(W / fw, H / fh) : Math.min(W / fw, H / fh);
+  return {cx: W / 2 + tf.x * W, cy: H / 2 + tf.y * H, dw: vw * base * tf.s, dh: vh * base * tf.s, rot: tf.r * Math.PI / 180};
+}
 function clipStart(c){ return c.track ? c.start : starts()[clips.indexOf(c)]; }
 function starts(){ let s = 0; return clips.map(c => { const r = s; s += clipDur(c); return r; }); }
 function clipAt(t){
@@ -2217,7 +2228,7 @@ function fitStage(){
   const W = wrap.clientWidth - pad, H = wrap.clientHeight - pad;
   let sw = W, sh = W * h / w; if (sh > H){ sh = H; sw = H * w / h; }
   st.style.width = Math.max(0, sw) + 'px'; st.style.height = Math.max(0, sh) + 'px';
-  drawGfx();
+  refreshTf(); drawGfx();
 }
 
 // ---------- visor / reproducción ----------
@@ -2229,6 +2240,15 @@ function elFor(media, preferNotShown = true){
   v.pause(); v._mid = media.id; v.src = media.url; v._pending = null; v._seeking = false;
   return v;
 }
+function applyTf(v, c){
+  v._clip = c;
+  if (!c || !c.media) return;
+  const st = $('stage'), g = clipGeom(c, st.clientWidth, st.clientHeight);
+  const key = [st.clientWidth, st.clientHeight, g.cx, g.cy, g.dw, g.dh, g.rot].join();
+  if (v._tfk === key) return; v._tfk = key;
+  Object.assign(v.style, {left: (g.cx - g.dw / 2) + 'px', top: (g.cy - g.dh / 2) + 'px', width: g.dw + 'px', height: g.dh + 'px', transform: g.rot ? `rotate(${g.rot}rad)` : ''});
+}
+function refreshTf(){ for (const v of [vA, vB, o2, o3]) if (v._clip){ v._tfk = null; applyTf(v, v._clip); } }
 function show(v){ if (shown === v) return; for (const x of [vA, vB]){ x.classList.toggle('on', x === v); if (x !== v) x.pause(); } shown = v; }
 function quietSeek(v, t){
   // sin metadatos todavía no hay evento 'seeked': el tiempo queda como posición inicial al cargar
@@ -2245,7 +2265,7 @@ function previewAt(t){
   if (!r){ show(null); return; }
   if (!r.c.media){ show(null); return; }
   const v = elFor(r.c.media, false);
-  show(v);
+  show(v); applyTf(v, r.c);
   const local = r.atEnd ? r.c.out - 0.5 / fps : r.c.in + (t - r.start);
   quietSeek(v, local);
 }
@@ -2273,7 +2293,7 @@ function startClipAt(t){
   const r = clipAt(t); if (!r) return null;
   if (!r.c.media){ show(null); return {c: r.c, v: null, t0: performance.now(), l0: t - r.start, st: r.start, i: r.i}; }
   const v = elFor(r.c.media, false);
-  show(v);
+  show(v); applyTf(v, r.c);
   const want = r.c.in + (t - r.start);
   if (Math.abs(v.currentTime - want) > 0.02) v.currentTime = want;
   v.volume = Math.min(1, Math.max(0, r.c.vol));
@@ -2285,12 +2305,12 @@ function goNext(i, end){
   if (!nx){ if (i < clips.length && total() - end > 1e-3){ show(null); return tailGap(end, end); } return null; }
   if (!nx.media){ show(null); return {c: nx, v: null, t0: performance.now(), l0: 0, st: end, i: i + 1}; }
   // mismo archivo y continuo (ej. clip dividido): seguir sin cortar
-  if (cur.v && prev.media && nx.media.id === prev.media.id && Math.abs(nx.in - prev.out) < 1.5 / fps){ cur.v.volume = Math.min(1, Math.max(0, nx.vol)); return {c: nx, v: cur.v, st: end, i: i + 1}; }
+  if (cur.v && prev.media && nx.media.id === prev.media.id && Math.abs(nx.in - prev.out) < 1.5 / fps){ cur.v.volume = Math.min(1, Math.max(0, nx.vol)); applyTf(cur.v, nx); return {c: nx, v: cur.v, st: end, i: i + 1}; }
   const v = elFor(nx.media, true);
   if (Math.abs(v.currentTime - nx.in) > 0.02) v.currentTime = nx.in;
   v.volume = Math.min(1, Math.max(0, nx.vol));
   v.play().catch(()=>{});
-  show(v);
+  show(v); applyTf(v, nx);
   return {c: nx, v, st: end, i: i + 1};
 }
 function tick(now){
@@ -2333,7 +2353,7 @@ function syncOver(){
     }
     const want = c.in + (playhead - c.start);
     if (v._mid !== c.media.id){ v.pause(); v._mid = c.media.id; v.src = c.media.url; v._seeking = false; v._pending = null; v.currentTime = want; }
-    v.volume = Math.min(1, Math.max(0, c.vol));
+    v.volume = Math.min(1, Math.max(0, c.vol)); applyTf(v, c);
     if (playing){
       if (v.paused){ if (!v.seeking && Math.abs(v.currentTime - want) > .05) v.currentTime = want; v.playbackRate = 1; v.play().catch(()=>{}); }
       else {
@@ -2648,7 +2668,7 @@ function drawTexts(ctx, w, h, t, boxes){
   }
 }
 const gfx = $('gfx'), gg = gfx.getContext('2d');
-let gfxBoxes = [], gdrag = null, gGuide = false;
+let gfxBoxes = [], gdrag = null, gGuide = false, gGuideH = false;
 function drawGfx(){
   const r = gfx.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   const w = Math.round(r.width * d), h = Math.round(r.height * d);
@@ -2658,20 +2678,71 @@ function drawGfx(){
   drawTexts(gg, w, h, playhead, gfxBoxes);
   const st = selText(), b = st && gfxBoxes.find(b => b.tx === st);
   if (b && !playing && !fsOn()){ gg.setLineDash([6 * d, 4 * d]); gg.lineWidth = 1.5 * d; gg.strokeStyle = '#f5b33d'; gg.strokeRect(b.x, b.y, b.w, b.h); gg.setLineDash([]); }
-  if (gGuide){ gg.fillStyle = '#f5b33dcc'; gg.fillRect(w / 2 - d / 2, 0, d, h); }
+  const vc = visClip();
+  if (vc && !playing && !fsOn()){
+    const g = clipGeom(vc, w, h);
+    gg.save(); gg.translate(g.cx, g.cy); gg.rotate(g.rot); gg.setLineDash([6 * d, 4 * d]); gg.lineWidth = 1.5 * d; gg.strokeStyle = '#4da3ff';
+    gg.strokeRect(-g.dw / 2, -g.dh / 2, g.dw, g.dh); gg.restore();
+  }
+  gg.fillStyle = '#f5b33dcc';
+  if (gGuide) gg.fillRect(w / 2 - d / 2, 0, d, h);
+  if (gGuideH) gg.fillRect(0, h / 2 - d / 2, w, d);
 }
+// clip seleccionado que está bajo el cursor (el que se puede encuadrar en el visor)
+function visClip(){
+  const c = selClip(); if (!c || !c.media) return null;
+  const s = clipStart(c); return playhead >= s - 1e-6 && playhead < s + clipDur(c) - 1e-6 ? c : null;
+}
+function setTf(c, patch){ c.tf = {...tfOf(c), ...patch}; refreshTf(); drawGfx(); }
+// Un dedo mueve el clip; dos dedos lo escalan y lo giran. Se imanta al centro, a 100% y a múltiplos de 90°.
+const gp = new Map(); let cg = null;
+function cgBase(){ cg = {c: cg.c, tf0: {...tfOf(cg.c)}, p0: new Map(gp), undo: cg.undo}; }
+function clipGesture(){
+  const ids = [...cg.p0.keys()].filter(k => gp.has(k)); if (!ids.length) return;
+  const W = gfx.width, H = gfx.height, d = W / gfx.getBoundingClientRect().width, t0 = cg.tf0;
+  let dx, dy, s = t0.s, r = t0.r;
+  if (ids.length >= 2){
+    const [a0, b0] = [cg.p0.get(ids[0]), cg.p0.get(ids[1])], [a, b] = [gp.get(ids[0]), gp.get(ids[1])];
+    s = t0.s * Math.hypot(b.x - a.x, b.y - a.y) / Math.max(1, Math.hypot(b0.x - a0.x, b0.y - a0.y));
+    r = t0.r + (Math.atan2(b.y - a.y, b.x - a.x) - Math.atan2(b0.y - a0.y, b0.x - a0.x)) * 180 / Math.PI;
+    dx = (a.x + b.x - a0.x - b0.x) / 2; dy = (a.y + b.y - a0.y - b0.y) / 2;
+  } else {
+    const a0 = cg.p0.get(ids[0]), a = gp.get(ids[0]); dx = a.x - a0.x; dy = a.y - a0.y;
+    if (!cg.undo && Math.hypot(dx, dy) < 6 * d) return;
+  }
+  if (!cg.undo){ pushUndo(); cg.undo = true; }
+  r = ((r % 360) + 540) % 360 - 180; const r90 = Math.round(r / 90) * 90; if (Math.abs(r - r90) < 3) r = r90; if (r === -180) r = 180;
+  s = Math.max(.05, Math.min(8, s)); if (Math.abs(s - 1) < .03) s = 1;
+  let x = t0.x + dx / W, y = t0.y + dy / H;
+  gGuide = Math.abs(x) * W < 10 * d; if (gGuide) x = 0;
+  gGuideH = Math.abs(y) * H < 10 * d; if (gGuideH) y = 0;
+  setTf(cg.c, {x, y, s, r});
+}
+// En el visor: tocar un texto lo selecciona; arrastrarlo lo ubica (se imanta al centro).
 // En el visor: tocar un texto lo selecciona; arrastrarlo lo ubica (se imanta al centro).
 gfx.addEventListener('pointerdown', e => {
   const r = gfx.getBoundingClientRect(), d = gfx.width / r.width;
   const x = (e.clientX - r.left) * d, y = (e.clientY - r.top) * d, tol = 12 * d;
-  const b = gfxBoxes.slice().reverse().find(b => x >= b.x - tol && x <= b.x + b.w + tol && y >= b.y - tol && y <= b.y + b.h + tol);
-  if (!b) return;
+  const b = !cg && gfxBoxes.slice().reverse().find(b => x >= b.x - tol && x <= b.x + b.w + tol && y >= b.y - tol && y <= b.y + b.h + tol);
+  if (!b){
+    if (gdrag) return;
+    const c = cg ? cg.c : visClip();
+    if (!c){ if (selClip() && selClip().media) toast('Poné el cursor sobre el clip para encuadrarlo'); return; }
+    try { gfx.setPointerCapture(e.pointerId); } catch (err){}
+    if (playing) pause();
+    gp.set(e.pointerId, {x, y}); cg = cg || {c, undo: false}; cgBase();
+    return;
+  }
   gfx.setPointerCapture(e.pointerId);
   if (playing) pause();
   if (selText() !== b.tx){ selection = {type: 'text', id: b.tx.id}; updInspector(); drawTL(); }
   gdrag = {tx: b.tx, x0: x, y0: y, ox: b.tx.x, oy: b.tx.y, d, moved: false};
 });
 gfx.addEventListener('pointermove', e => {
+  if (cg && gp.has(e.pointerId)){
+    const r = gfx.getBoundingClientRect(), d = gfx.width / r.width;
+    gp.set(e.pointerId, {x: (e.clientX - r.left) * d, y: (e.clientY - r.top) * d}); clipGesture(); return;
+  }
   if (!gdrag) return;
   const r = gfx.getBoundingClientRect(), dd = gdrag.d;
   const dx = (e.clientX - r.left) * dd - gdrag.x0, dy = (e.clientY - r.top) * dd - gdrag.y0;
@@ -2681,7 +2752,14 @@ gfx.addEventListener('pointermove', e => {
   gdrag.tx.x = Math.max(0, Math.min(1, nx)); gdrag.tx.y = Math.max(0, Math.min(1, ny));
   drawGfx();
 });
-const gEnd = () => { if (!gdrag) return; gdrag = null; gGuide = false; drawGfx(); };
+const gEnd = e => {
+  if (cg && gp.has(e.pointerId)){
+    gp.delete(e.pointerId);
+    if (gp.size) cgBase(); else { cg = null; gGuide = gGuideH = false; drawGfx(); updInspector(); }
+    return;
+  }
+  if (!gdrag) return; gdrag = null; gGuide = false; drawGfx();
+};
 gfx.addEventListener('pointerup', gEnd); gfx.addEventListener('pointercancel', gEnd);
 
 // ---------- trim y mover entre pistas ----------
@@ -2709,7 +2787,7 @@ function dragTrim(c, o, zone, st, dt){
 function trimFrame(c, t){   // el visor muestra el cuadro del borde mientras se recorta
   if (!c.media) return;
   o2.classList.remove('on'); o3.classList.remove('on');
-  const v = elFor(c.media, false); show(v); quietSeek(v, Math.max(0, t));
+  const v = elFor(c.media, false); show(v); applyTf(v, c); quietSeek(v, Math.max(0, t));
 }
 // Encima en V2/V3 pisa lo que haya en esa pista (como sobrescribir).
 function overwrite(k, a, b, self){
@@ -2951,10 +3029,21 @@ function updInspector(){
       bl.disabled = i === 0; br.disabled = i === clips.length - 1; g2.append(bl, br); box.append(g2, sep());
     }
     box.append(volCtl(sc.vol, v => { sc.vol = v; drawTL(); }), sep());
+    if (sc.media){
+      const tf = tfOf(sc), fg = grp();
+      fg.append(pick({fit: 'Ajustar', fill: 'Llenar'}, tf.fill ? 'fill' : 'fit', v => { pushUndo(); setTf(sc, {fill: v === 'fill'}); }));
+      const r = document.createElement('input'); r.type = 'range'; r.min = 10; r.max = 400; r.step = 1; r.value = Math.round(tf.s * 100);
+      const sl = lab('Escala ' + r.value + '%'); r.onpointerdown = () => pushUndo();
+      r.oninput = () => { sl.textContent = 'Escala ' + r.value + '%'; setTf(sc, {s: r.value / 100}); };
+      const rot = d => { pushUndo(); let a = Math.round((tfOf(sc).r + d) / 90) * 90; a = ((a % 360) + 540) % 360 - 180; if (a === -180) a = 180; setTf(sc, {r: a}); updInspector(); };
+      fg.append(sl, r, btn('↺', () => rot(-90), 'icon'), lab(Math.round(tf.r) + '°'), btn('↻', () => rot(90), 'icon'),
+        btn('Restablecer', () => { pushUndo(); setTf(sc, TF0); updInspector(); }));
+      box.append(fg, sep());
+    }
     const bres = btn('Restaurar', () => { pushUndo(); sc.in = 0; sc.out = sc.media.duration; afterEdit(); }); bres.disabled = sc.in === 0 && sc.out === sc.media.duration;
     box.append(bres, btn('Eliminar', () => removeClip(sc), 'danger'));
     const h = document.createElement('span'); h.className = 'hint';
-    h.textContent = (inside ? '' : 'Ubicá el cursor dentro del clip para cortar o dividir. ') + 'Arrastrá los bordes amarillos para recortar; arrastrá el clip arriba o abajo para cambiarlo de pista.';
+    h.textContent = (inside ? '' : 'Ubicá el cursor dentro del clip para cortar o dividir. ') + 'Arrastrá los bordes amarillos para recortar; arrastrá el clip arriba o abajo para cambiarlo de pista. En el visor: un dedo mueve el video, dos dedos lo escalan y lo giran.';
     box.append(h);
   } else if (selection && selection.type === 'music' && music){
     const info = document.createElement('div');
@@ -3278,11 +3367,13 @@ async function runExport(short, F, q){
         venc.encode(fr, {keyFrame: n % (F * 2) === 0}); fr.close(); n++;
       }
     };
-    const drawV = v => {
-      bx.fillStyle = '#000'; bx.fillRect(0, 0, w, h);
-      const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
-      const s = Math.min(w / vw, h / vh), dw = vw * s, dh = vh * s;
-      bx.drawImage(v, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    bx.imageSmoothingQuality = 'high';
+    const drawV = (v, c) => {
+      bx.setTransform(1, 0, 0, 1, 0, 0); bx.fillStyle = '#000'; bx.fillRect(0, 0, w, h);
+      if (!v.videoWidth) return;
+      const g = clipGeom(c, w, h);
+      bx.translate(g.cx, g.cy); bx.rotate(g.rot); bx.drawImage(v, -g.dw / 2, -g.dh / 2, g.dw, g.dh);
+      bx.setTransform(1, 0, 0, 1, 0, 0);
     };
     const xv = $('xv');
     let start = 0;
@@ -3294,7 +3385,7 @@ async function runExport(short, F, q){
       if (!cl.media){ bx.fillStyle = '#000'; bx.fillRect(0, 0, w, h); encodeUntil(endIdx, start + d + 1); start += d; continue; }
       if (xv.src !== cl.media.url) await loadMeta(xv, cl.media.url);
       await seekTo(xv, cl.in);
-      drawV(xv);
+      drawV(xv, cl.src);
       await new Promise((resolve, reject) => {
         let done = false, lastFrameAt = performance.now();
         const finish = () => {
@@ -3308,7 +3399,7 @@ async function runExport(short, F, q){
           if (verr){ done = true; clearInterval(wd); reject(verr); return; }
           const mt = meta.mediaTime;
           if (mt >= cl.out - 0.25 / F){ finish(); return; }
-          drawV(xv);
+          drawV(xv, cl.src);
           encodeUntil(endIdx, start + (mt - cl.in));
           setP(n / N, `Video: ${fmtShort(n / F)} de ${fmtShort(T)}`);
           if (venc.encodeQueueSize > 6){
